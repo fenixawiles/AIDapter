@@ -9,6 +9,7 @@ up in a provider's terminal.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -46,6 +47,9 @@ _SYSTEM_CLI_DIRECTORIES = (
     "/opt/homebrew/sbin",
     "/usr/local/bin",
     "/Applications/ChatGPT.app/Contents/Resources",
+)
+_VERSION_DIRECTORY = re.compile(
+    r"^v?(?P<major>\d+)(?:\.(?P<minor>\d+))?(?:\.(?P<patch>\d+))?(?P<suffix>[-+].*)?$"
 )
 
 
@@ -97,6 +101,21 @@ def _connected_cli_directories(workspace: Workspace) -> list[str]:
     return directories
 
 
+def _version_manager_sort_key(path: Path) -> tuple[int, int, int, bool, str]:
+    """Order version-manager bins newest-first without lexical v9/v20 errors."""
+    for part in reversed(path.parts):
+        match = _VERSION_DIRECTORY.fullmatch(part)
+        if match:
+            return (
+                int(match.group("major")),
+                int(match.group("minor") or 0),
+                int(match.group("patch") or 0),
+                match.group("suffix") is None,
+                part,
+            )
+    return (0, 0, 0, False, str(path))
+
+
 def desktop_cli_path(
     current: str | None = None,
     *,
@@ -110,7 +129,11 @@ def desktop_cli_path(
     version_managers = [
         str(path)
         for pattern in _VERSION_MANAGER_CLI_GLOBS
-        for path in sorted(user_home.glob(pattern), reverse=True)
+        for path in sorted(
+            user_home.glob(pattern),
+            key=_version_manager_sort_key,
+            reverse=True,
+        )
     ]
     candidates = [
         *existing,
@@ -132,16 +155,26 @@ def desktop_cli_path(
     return os.pathsep.join(result)
 
 
-def prepare_desktop_environment() -> None:
+def prepare_desktop_environment(workspace: Workspace | None = None) -> None:
     """Give a Finder-launched app the CLI environment a terminal already has."""
-    os.environ["PATH"] = desktop_cli_path()
+    os.environ["PATH"] = desktop_cli_path(workspace=workspace)
+
+
+def _requested_workspace(args: list[str]) -> Workspace:
+    """Resolve the global ``--home`` early enough to prepare desktop PATH."""
+    for index, argument in enumerate(args):
+        if argument == "--home" and index + 1 < len(args):
+            return resolve_workspace(args[index + 1])
+        if argument.startswith("--home="):
+            return resolve_workspace(argument.partition("=")[2])
+    return resolve_workspace()
 
 
 def main() -> int:
     # Finder adds this opaque process-serial-number argument on some macOS
     # versions.  It is not a command the CLI should try to parse.
-    prepare_desktop_environment()
     args = [arg for arg in sys.argv[1:] if not arg.startswith("-psn_")]
+    prepare_desktop_environment(_requested_workspace(args))
     return cli_main(args or ["ui"])
 
 

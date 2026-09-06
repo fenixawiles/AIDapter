@@ -94,6 +94,47 @@ def test_desktop_entrypoint_prepares_path_before_starting_the_ui(tmp_path, monke
     assert mac_app.main() == 0
 
 
+def test_desktop_entrypoint_uses_the_explicit_workspace_for_connected_clis(
+    tmp_path,
+    monkeypatch,
+):
+    cli = executable(tmp_path / "custom-toolchain" / "claude")
+    requested = connected_workspace(tmp_path / "requested-state", "claude_code", cli)
+    monkeypatch.setenv("PATH", FINDER_PATH)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SYNCHRI_HOME", str(tmp_path / "default-state"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["Synchri", "--home", str(requested.home), "ui"],
+    )
+
+    def fake_main(args):
+        assert args == ["--home", str(requested.home), "ui"]
+        assert shutil.which("claude") == str(cli)
+        return 0
+
+    monkeypatch.setattr(mac_app, "cli_main", fake_main)
+
+    assert mac_app.main() == 0
+    assert mac_app._requested_workspace([f"--home={requested.home}"]).home == requested.home
+
+
+def test_version_manager_paths_are_ordered_by_version_not_text(tmp_path):
+    old = tmp_path / "home" / ".nvm" / "versions" / "node" / "v9.0.0" / "bin"
+    current = tmp_path / "home" / ".nvm" / "versions" / "node" / "v20.0.0" / "bin"
+    old.mkdir(parents=True)
+    current.mkdir(parents=True)
+
+    resolved = mac_app.desktop_cli_path(
+        FINDER_PATH,
+        home=tmp_path / "home",
+        workspace=Workspace(tmp_path / "empty-state"),
+    ).split(os.pathsep)
+
+    assert resolved.index(str(current)) < resolved.index(str(old))
+
+
 def test_desktop_path_does_not_trust_failed_or_misnamed_runtime_records(tmp_path):
     failed = executable(tmp_path / "failed-toolchain" / "claude")
     workspace = connected_workspace(
