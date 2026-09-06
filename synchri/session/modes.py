@@ -19,6 +19,12 @@ from pathlib import Path
 from ..errors import ValidationError
 from .permissions import Decision, PermissionSet
 
+_ENV_EXECUTABLE = (
+    "/usr/bin/env"
+    if os.name == "posix" and Path("/usr/bin/env").is_file()
+    else None
+)
+
 
 class SessionMode(str, Enum):
     # Keep the historical values readable so an existing room is never made
@@ -789,10 +795,10 @@ def resolve_runtime_command(
                     if value and str(Path(value).expanduser()) != runtime_directory
                 ]
             )
-            if argv[0] == "/usr/bin/env":
+            if _ENV_EXECUTABLE and argv[0] == _ENV_EXECUTABLE:
                 argv.insert(1, f"PATH={child_path}")
-            else:
-                argv = ["/usr/bin/env", f"PATH={child_path}", *argv]
+            elif _ENV_EXECUTABLE:
+                argv = [_ENV_EXECUTABLE, f"PATH={child_path}", *argv]
             resolved = shlex.join(argv)
             for placeholder, original in placeholders.items():
                 resolved = resolved.replace(placeholder, original)

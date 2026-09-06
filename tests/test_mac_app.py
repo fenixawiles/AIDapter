@@ -10,6 +10,7 @@ from pathlib import Path
 from synchri import mac_app
 from synchri.config import Workspace
 from synchri.runner import doctor
+from synchri.session import modes
 from synchri.session.modes import (
     KNOWN_RUNTIMES,
     ParticipantPlan,
@@ -232,3 +233,18 @@ def test_resume_command_keeps_both_deferred_values_unquoted(tmp_path, monkeypatc
     assert str(claude) in argv
     assert "{resume_id}" in argv
     assert "{prompt}" in argv
+
+
+def test_non_posix_commands_do_not_depend_on_usr_bin_env(tmp_path, monkeypatch):
+    claude = executable(tmp_path / "provider tools" / "claude")
+    monkeypatch.setenv("PATH", str(claude.parent))
+    monkeypatch.setattr(modes, "_ENV_EXECUTABLE", None)
+
+    command = resolve_runtime_command(
+        "claude_code",
+        KNOWN_RUNTIMES["claude_code"]["managed_command"],
+    )
+    argv = shlex.split(command)
+
+    assert argv[0] == str(claude)
+    assert not any(argument.startswith("PATH=") for argument in argv)
