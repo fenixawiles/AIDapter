@@ -29,6 +29,7 @@ from ..session.modes import (
     managed_command,
     plan_launch_status,
     planning_command,
+    resolve_runtime_command,
     stream_format_for,
 )
 from . import recovery
@@ -887,7 +888,12 @@ class ManagedRunnerRegistry:
                 state = {"resume_id": None, "runtime_status": None}
             needs_recovery = state.get("runtime_status") in recovery.LADDER_KINDS
             resume_id = state.get("resume_id")
-            template = (KNOWN_RUNTIMES.get(plan.runtime) or {}).get("resume_command")
+            definition = KNOWN_RUNTIMES.get(plan.runtime) or {}
+            template = resolve_runtime_command(
+                plan.runtime,
+                definition.get("resume_command"),
+                definition=definition,
+            )
             if needs_recovery and resume_id and template and self._resume_allowed(manager, plan.runtime):
                 command = template.replace("{resume_id}", shlex.quote(resume_id))
                 agent = self._build_agent(record, plan, command)

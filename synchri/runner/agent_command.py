@@ -83,9 +83,16 @@ class AgentCommand:
             argv = shlex.split(command)
         except ValueError as exc:
             raise ValidationError(f"could not parse the command for {name!r}: {exc}") from exc
+        # Imported lazily to avoid a module cycle: the session-mode catalog
+        # defines maintained commands, while this runner is also used by the
+        # generic CLI path. The envelope carries child-only variables without
+        # depending on a shell or a platform-specific `env` executable.
+        from ..session.modes import split_runtime_command_environment
+
+        argv, environment = split_runtime_command_environment(argv)
         if not argv:
             raise ValidationError(f"no command given for participant {name!r}")
-        return cls(name=name, argv=argv, timeout=timeout, cwd=cwd)
+        return cls(name=name, argv=argv, timeout=timeout, cwd=cwd, env=environment)
 
     def build_argv(self, prompt: str) -> list[str]:
         return [part.replace(PROMPT_PLACEHOLDER, prompt) for part in self.argv]

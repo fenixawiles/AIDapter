@@ -9,6 +9,9 @@ new entry in ``POLICIES``, not a redesign of startup.
 from __future__ import annotations
 
 import json
+import os
+import re
+import shlex
 import shutil
 from dataclasses import dataclass, field
 from enum import Enum
@@ -16,6 +19,9 @@ from pathlib import Path
 
 from ..errors import ValidationError
 from .permissions import Decision, PermissionSet
+
+_RUNTIME_ENV_PREFIX = "__synchri_runtime_env__"
+_ENVIRONMENT_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=(.*)$", re.DOTALL)
 
 
 class SessionMode(str, Enum):
@@ -709,6 +715,117 @@ def default_agent_name(runtime: str, taken: set[str] | None = None) -> str:
     return f"{base}-{counter}"
 
 
+_RUNTIME_EXECUTABLE_OVERRIDES: dict[str, str] = {}
+
+
+def configure_runtime_executable_overrides(overrides: dict[str, str]) -> None:
+    """Replace the process-local executable map restored by the desktop app."""
+    _RUNTIME_EXECUTABLE_OVERRIDES.clear()
+    _RUNTIME_EXECUTABLE_OVERRIDES.update(overrides)
+
+
+def split_runtime_command_environment(argv: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Remove a maintained environment envelope before direct process launch."""
+    if not argv or argv[0] != _RUNTIME_ENV_PREFIX:
+        return argv, {}
+    environment: dict[str, str] = {}
+    index = 1
+    while index < len(argv):
+        match = _ENVIRONMENT_ASSIGNMENT.fullmatch(argv[index])
+        if not match:
+            break
+        key, _, value = argv[index].partition("=")
+        environment[key] = value
+        index += 1
+    return argv[index:], environment
+
+
+def resolve_runtime_executable(runtime: str, *, definition: dict | None = None) -> str | None:
+    """Resolve a maintained runtime once, before any provider command runs."""
+    spec = definition or KNOWN_RUNTIMES.get(runtime, KNOWN_RUNTIMES["generic"])
+    executable = spec.get("executable")
+    override = _RUNTIME_EXECUTABLE_OVERRIDES.get(runtime)
+    if executable and override:
+        candidate = Path(override).expanduser()
+        if (
+            candidate.is_absolute()
+            and candidate.name == executable
+            and candidate.is_file()
+            and os.access(candidate, os.X_OK)
+        ):
+            return str(candidate)
+    return shutil.which(executable) if executable else None
+
+
+def resolve_runtime_command(
+    runtime: str,
+    command: str | None,
+    *,
+    definition: dict | None = None,
+    executable_path: str | None = None,
+) -> str | None:
+    """Pin a maintained command to the executable that readiness verified.
+
+    Adapter definitions stay path-independent, which keeps their durable
+    revision stable. The returned command does not: it replaces the runtime's
+    executable token with an absolute path, including commands wrapped by
+    ``/usr/bin/env`` such as Copilot's protected canary.
+    """
+    if not command:
+        return None
+    spec = definition or KNOWN_RUNTIMES.get(runtime, KNOWN_RUNTIMES["generic"])
+    executable = spec.get("executable")
+    path = executable_path or resolve_runtime_executable(runtime, definition=spec)
+    if not executable or not path:
+        return command
+    prompt_placeholder = "__SYNCHRI_PROMPT_PLACEHOLDER__"
+    resume_placeholder = "__SYNCHRI_RESUME_PLACEHOLDER__"
+    placeholders = {
+        prompt_placeholder: "{prompt}",
+        resume_placeholder: "{resume_id}",
+    }
+    parseable = command.replace("{prompt}", prompt_placeholder).replace(
+        "{resume_id}", resume_placeholder
+    )
+    try:
+        argv = shlex.split(parseable)
+    except ValueError:
+        return command
+    if argv and argv[0] == "/usr/bin/env":
+        # Adapter definitions may carry environment assignments (Copilot's
+        # hardened canary does). Turn the platform-specific wrapper into an
+        # internal envelope; AgentCommand and passive probes consume it into
+        # the subprocess environment before launch on every operating system.
+        argv[0] = _RUNTIME_ENV_PREFIX
+    for index, argument in enumerate(argv):
+        if argument in {executable, path}:
+            argv[index] = path
+            # Node-installed CLIs commonly use ``#!/usr/bin/env node``. Put
+            # the selected CLI's own bin directory first for this child only,
+            # so its launcher cannot accidentally inherit Node from a newer
+            # nvm/fnm installation. This also avoids globally promoting
+            # sibling provider executables from a connected runtime record.
+            runtime_directory = str(Path(path).parent)
+            inherited_path = os.environ.get("PATH", os.defpath)
+            child_path = os.pathsep.join(
+                [runtime_directory]
+                + [
+                    value
+                    for value in inherited_path.split(os.pathsep)
+                    if value and str(Path(value).expanduser()) != runtime_directory
+                ]
+            )
+            if argv[0] == _RUNTIME_ENV_PREFIX:
+                argv.insert(1, f"PATH={child_path}")
+            else:
+                argv = [_RUNTIME_ENV_PREFIX, f"PATH={child_path}", *argv]
+            resolved = shlex.join(argv)
+            for placeholder, original in placeholders.items():
+                resolved = resolved.replace(placeholder, original)
+            return resolved
+    return command
+
+
 def runtime_status(runtime: str) -> dict:
     """Return an honest, cheap local readiness check for one runtime.
 
@@ -719,7 +836,7 @@ def runtime_status(runtime: str) -> dict:
     """
     definition = KNOWN_RUNTIMES.get(runtime, KNOWN_RUNTIMES["generic"])
     executable = definition.get("executable")
-    path = shutil.which(executable) if executable else None
+    path = resolve_runtime_executable(runtime, definition=definition)
     installed = bool(path)
     managed = bool(path and definition.get("managed_command"))
     if managed:
@@ -773,10 +890,17 @@ def managed_command(plan: ParticipantPlan, *, plain: bool = False) -> str | None
     if plan.command and plan.command.strip():
         return plan.command.strip()
     definition = KNOWN_RUNTIMES.get(plan.runtime, KNOWN_RUNTIMES["generic"])
-    if runtime_status(plan.runtime)["managed"]:
+    status = runtime_status(plan.runtime)
+    if status["managed"]:
+        command = definition.get("managed_command")
         if plain:
-            return definition.get("plain_managed_command") or definition.get("managed_command")
-        return definition.get("managed_command")
+            command = definition.get("plain_managed_command") or command
+        return resolve_runtime_command(
+            plan.runtime,
+            command,
+            definition=definition,
+            executable_path=status["path"],
+        )
     return None
 
 
@@ -790,11 +914,18 @@ def planning_command(plan: ParticipantPlan, *, plain: bool = False) -> str | Non
     definition = KNOWN_RUNTIMES.get(plan.runtime, KNOWN_RUNTIMES["generic"])
     if not definition.get("read_only_planning_workspace"):
         return None
-    if not runtime_status(plan.runtime)["installed"]:
+    status = runtime_status(plan.runtime)
+    if not status["installed"]:
         return None
+    command = definition.get("planning_command")
     if plain:
-        return definition.get("plain_planning_command") or definition.get("planning_command")
-    return definition.get("planning_command")
+        command = definition.get("plain_planning_command") or command
+    return resolve_runtime_command(
+        plan.runtime,
+        command,
+        definition=definition,
+        executable_path=status["path"],
+    )
 
 
 def stream_format_for(plan: ParticipantPlan) -> str | None:

@@ -55,6 +55,8 @@ def test_release_build_installs_the_declared_runtime_dependencies():
 
     assert "python -m pip install --upgrade pyinstaller ." in workflow
     assert "--collect-data certifi" in sidecar
+    assert "PATH=/usr/bin:/bin:/usr/sbin:/sbin" in sidecar
+    assert '"claude_code" in payload["managed_ready"]' in sidecar
     assert "make_tauri_update_manifest.py" in workflow
     assert (
         'env COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs --no-acls --no-fflags'
