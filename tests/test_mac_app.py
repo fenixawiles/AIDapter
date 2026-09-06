@@ -122,7 +122,17 @@ def test_desktop_entrypoint_uses_the_explicit_workspace_for_connected_clis(
 
 def test_version_manager_paths_are_ordered_by_version_not_text(tmp_path):
     old = tmp_path / "home" / ".nvm" / "versions" / "node" / "v9.0.0" / "bin"
-    current = tmp_path / "home" / ".nvm" / "versions" / "node" / "v20.0.0" / "bin"
+    current = (
+        tmp_path
+        / "home"
+        / ".local"
+        / "share"
+        / "fnm"
+        / "node-versions"
+        / "v20.0.0"
+        / "installation"
+        / "bin"
+    )
     old.mkdir(parents=True)
     current.mkdir(parents=True)
 

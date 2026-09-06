@@ -126,11 +126,15 @@ def desktop_cli_path(
     user_home = (home or Path.home()).expanduser()
     existing = (os.environ.get("PATH", "") if current is None else current).split(os.pathsep)
     connected = _connected_cli_directories(workspace or resolve_workspace())
+    version_manager_paths = (
+        path
+        for pattern in _VERSION_MANAGER_CLI_GLOBS
+        for path in user_home.glob(pattern)
+    )
     version_managers = [
         str(path)
-        for pattern in _VERSION_MANAGER_CLI_GLOBS
         for path in sorted(
-            user_home.glob(pattern),
+            version_manager_paths,
             key=_version_manager_sort_key,
             reverse=True,
         )
