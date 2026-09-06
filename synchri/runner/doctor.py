@@ -33,7 +33,12 @@ from pathlib import Path
 
 from ..errors import ValidationError
 from ..ids import utc_now
-from ..session.modes import KNOWN_RUNTIMES, runtime_tool_permission_status
+from ..session.modes import (
+    KNOWN_RUNTIMES,
+    resolve_runtime_command,
+    resolve_runtime_executable,
+    runtime_tool_permission_status,
+)
 from ..storage import db
 from .agent_command import AgentCommand
 from .stream_events import parser_for
@@ -151,7 +156,7 @@ def passive_report(
     checks: list[dict] = []
 
     executable = spec.get("executable")
-    path = shutil.which(executable) if executable else None
+    path = resolve_runtime_executable(runtime, definition=spec)
     if path:
         checks.append(_check("installed", PASS, path))
     elif executable:
@@ -489,6 +494,12 @@ def run_connection_test(
             "checks": [_check("installed", FAIL, "the executable was not found on PATH")],
             "detail": "install the CLI first",
         }
+    command = resolve_runtime_command(
+        runtime,
+        command,
+        definition=spec,
+        executable_path=facts["executable_path"],
+    )
 
     notify = progress or (lambda phase, detail="": None)
     stream_format = spec.get("stream_format")
@@ -512,7 +523,12 @@ def run_connection_test(
         if not result.ok and not result.cancelled and stream_format:
             from .managed import _looks_like_flag_rejection
 
-            plain = spec.get("plain_connection_test_command")
+            plain = resolve_runtime_command(
+                runtime,
+                spec.get("plain_connection_test_command"),
+                definition=spec,
+                executable_path=facts["executable_path"],
+            )
             if _looks_like_flag_rejection(result) and plain:
                 # The plain retry keeps the same enforcement flags — never a
                 # fallback to an unenforced invocation.
@@ -583,7 +599,12 @@ def run_connection_test(
         # doctor refuses to fake.
         connected = replied and result.ok and not any(c["state"] == FAIL for c in checks)
 
-        resume_command = spec.get("connection_test_resume_command")
+        resume_command = resolve_runtime_command(
+            runtime,
+            spec.get("connection_test_resume_command"),
+            definition=spec,
+            executable_path=facts["executable_path"],
+        )
         if not spec.get("resume_command"):
             resume_detail = "the maintained adapter does not define resume for this runtime"
         elif not resume_command:

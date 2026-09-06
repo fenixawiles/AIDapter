@@ -9,6 +9,7 @@ new entry in ``POLICIES``, not a redesign of startup.
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 from dataclasses import dataclass, field
 from enum import Enum
@@ -709,6 +710,57 @@ def default_agent_name(runtime: str, taken: set[str] | None = None) -> str:
     return f"{base}-{counter}"
 
 
+def resolve_runtime_executable(runtime: str, *, definition: dict | None = None) -> str | None:
+    """Resolve a maintained runtime once, before any provider command runs."""
+    spec = definition or KNOWN_RUNTIMES.get(runtime, KNOWN_RUNTIMES["generic"])
+    executable = spec.get("executable")
+    return shutil.which(executable) if executable else None
+
+
+def resolve_runtime_command(
+    runtime: str,
+    command: str | None,
+    *,
+    definition: dict | None = None,
+    executable_path: str | None = None,
+) -> str | None:
+    """Pin a maintained command to the executable that readiness verified.
+
+    Adapter definitions stay path-independent, which keeps their durable
+    revision stable. The returned command does not: it replaces the runtime's
+    executable token with an absolute path, including commands wrapped by
+    ``/usr/bin/env`` such as Copilot's protected canary.
+    """
+    if not command:
+        return None
+    spec = definition or KNOWN_RUNTIMES.get(runtime, KNOWN_RUNTIMES["generic"])
+    executable = spec.get("executable")
+    path = executable_path or resolve_runtime_executable(runtime, definition=spec)
+    if not executable or not path:
+        return command
+    prompt_placeholder = "__SYNCHRI_PROMPT_PLACEHOLDER__"
+    resume_placeholder = "__SYNCHRI_RESUME_PLACEHOLDER__"
+    placeholders = {
+        prompt_placeholder: "{prompt}",
+        resume_placeholder: "{resume_id}",
+    }
+    parseable = command.replace("{prompt}", prompt_placeholder).replace(
+        "{resume_id}", resume_placeholder
+    )
+    try:
+        argv = shlex.split(parseable)
+    except ValueError:
+        return command
+    for index, argument in enumerate(argv):
+        if argument == executable:
+            argv[index] = path
+            resolved = shlex.join(argv)
+            for placeholder, original in placeholders.items():
+                resolved = resolved.replace(placeholder, original)
+            return resolved
+    return command
+
+
 def runtime_status(runtime: str) -> dict:
     """Return an honest, cheap local readiness check for one runtime.
 
@@ -719,7 +771,7 @@ def runtime_status(runtime: str) -> dict:
     """
     definition = KNOWN_RUNTIMES.get(runtime, KNOWN_RUNTIMES["generic"])
     executable = definition.get("executable")
-    path = shutil.which(executable) if executable else None
+    path = resolve_runtime_executable(runtime, definition=definition)
     installed = bool(path)
     managed = bool(path and definition.get("managed_command"))
     if managed:
@@ -773,10 +825,17 @@ def managed_command(plan: ParticipantPlan, *, plain: bool = False) -> str | None
     if plan.command and plan.command.strip():
         return plan.command.strip()
     definition = KNOWN_RUNTIMES.get(plan.runtime, KNOWN_RUNTIMES["generic"])
-    if runtime_status(plan.runtime)["managed"]:
+    status = runtime_status(plan.runtime)
+    if status["managed"]:
+        command = definition.get("managed_command")
         if plain:
-            return definition.get("plain_managed_command") or definition.get("managed_command")
-        return definition.get("managed_command")
+            command = definition.get("plain_managed_command") or command
+        return resolve_runtime_command(
+            plan.runtime,
+            command,
+            definition=definition,
+            executable_path=status["path"],
+        )
     return None
 
 
@@ -790,11 +849,18 @@ def planning_command(plan: ParticipantPlan, *, plain: bool = False) -> str | Non
     definition = KNOWN_RUNTIMES.get(plan.runtime, KNOWN_RUNTIMES["generic"])
     if not definition.get("read_only_planning_workspace"):
         return None
-    if not runtime_status(plan.runtime)["installed"]:
+    status = runtime_status(plan.runtime)
+    if not status["installed"]:
         return None
+    command = definition.get("planning_command")
     if plain:
-        return definition.get("plain_planning_command") or definition.get("planning_command")
-    return definition.get("planning_command")
+        command = definition.get("plain_planning_command") or command
+    return resolve_runtime_command(
+        plan.runtime,
+        command,
+        definition=definition,
+        executable_path=status["path"],
+    )
 
 
 def stream_format_for(plan: ParticipantPlan) -> str | None:

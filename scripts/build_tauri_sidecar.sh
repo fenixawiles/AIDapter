@@ -53,4 +53,28 @@ ditto "$ENGINE" "$BUILD_ROOT"
 mv "$BUILD_ROOT/synchri-engine" "$BUILD_ROOT/synchri-core"
 rm -rf "$TARGET_ROOT"
 mv "$BUILD_ROOT" "$TARGET_ROOT"
+
+# Reproduce LaunchServices' stripped environment against the frozen artifact,
+# not only source Python. A fake provider executable in a standard per-user
+# location is enough: `doctor` is passive and never invokes it. This prevents a
+# release from restoring the old "connected in Terminal, paste prompts in the
+# app" split because PyInstaller omitted the desktop environment bootstrap.
+SMOKE_ROOT=$(mktemp -d -t synchri-sidecar-path)
+cleanup_smoke() {
+  rm -rf "$SMOKE_ROOT"
+}
+trap cleanup_smoke EXIT INT TERM
+mkdir -p "$SMOKE_ROOT/home/.local/bin"
+ln -s /usr/bin/true "$SMOKE_ROOT/home/.local/bin/claude"
+env \
+  HOME="$SMOKE_ROOT/home" \
+  SYNCHRI_HOME="$SMOKE_ROOT/state" \
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+  "$TARGET_ROOT/synchri-core" --json doctor > "$SMOKE_ROOT/doctor.json"
+"$PYTHON" -c \
+  'import json, sys; payload=json.load(open(sys.argv[1], encoding="utf-8")); assert "claude_code" in payload["managed_ready"]' \
+  "$SMOKE_ROOT/doctor.json"
+cleanup_smoke
+trap - EXIT INT TERM
+
 printf 'Built sidecar bundle %s\n' "$TARGET_ROOT"
