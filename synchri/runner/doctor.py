@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
 import shlex
@@ -38,6 +39,7 @@ from ..session.modes import (
     resolve_runtime_command,
     resolve_runtime_executable,
     runtime_tool_permission_status,
+    split_runtime_command_environment,
 )
 from ..storage import db
 from .agent_command import AgentCommand
@@ -121,11 +123,17 @@ def _probe_version(command: str, timeout: float) -> tuple[str, str | None, str]:
         argv = shlex.split(command)
     except ValueError as exc:
         return UNKNOWN, None, f"unusable version command: {exc}"
+    argv, environment = split_runtime_command_environment(argv)
     if not argv:
         return UNKNOWN, None, "no version command"
     try:
         result = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, check=False
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env={**os.environ, **environment} if environment else None,
         )
     except FileNotFoundError:
         return FAIL, None, "the executable disappeared while probing its version"

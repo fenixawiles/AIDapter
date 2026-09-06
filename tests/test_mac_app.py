@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import os
-import shlex
 import sys
 from pathlib import Path
 
 from synchri import mac_app
 from synchri.config import Workspace
 from synchri.runner import doctor
-from synchri.session import modes
 from synchri.session.modes import (
     KNOWN_RUNTIMES,
     ParticipantPlan,
@@ -192,10 +190,9 @@ def test_maintained_commands_pin_the_resolved_runtime_executable(tmp_path, monke
     plan = ParticipantPlan("Claude", "claude_code", "primary_builder")
 
     for command in (managed_command(plan), planning_command(plan)):
-        argv = shlex.split(command)
-        assert argv[0] == "/usr/bin/env"
-        assert argv[1].removeprefix("PATH=").split(os.pathsep)[0] == str(claude.parent)
-        assert str(claude) in argv
+        agent = doctor.AgentCommand.parse(f"claude={command}")
+        assert agent.argv[0] == str(claude)
+        assert agent.env["PATH"].split(os.pathsep)[0] == str(claude.parent)
 
 
 def test_wrapped_canary_pins_copilot_without_losing_placeholders(tmp_path, monkeypatch):
@@ -208,12 +205,12 @@ def test_wrapped_canary_pins_copilot_without_losing_placeholders(tmp_path, monke
         definition["connection_test_command"],
         definition=definition,
     )
-    argv = shlex.split(command)
+    agent = doctor.AgentCommand.parse(f"copilot={command}")
 
-    assert argv[0] == "/usr/bin/env"
-    assert argv[1].removeprefix("PATH=").split(os.pathsep)[0] == str(copilot.parent)
-    assert str(copilot) in argv
-    assert "{prompt}" in argv
+    assert agent.argv[0] == str(copilot)
+    assert agent.env["PATH"].split(os.pathsep)[0] == str(copilot.parent)
+    assert agent.env["COPILOT_HOME"] == ".synchri-copilot-canary"
+    assert "{prompt}" in agent.argv
 
 
 def test_resume_command_keeps_both_deferred_values_unquoted(tmp_path, monkeypatch):
@@ -226,25 +223,25 @@ def test_resume_command_keeps_both_deferred_values_unquoted(tmp_path, monkeypatc
         definition["resume_command"],
         definition=definition,
     )
-    argv = shlex.split(command)
+    agent = doctor.AgentCommand.parse(f"claude={command}")
 
-    assert argv[0] == "/usr/bin/env"
-    assert argv[1].removeprefix("PATH=").split(os.pathsep)[0] == str(claude.parent)
-    assert str(claude) in argv
-    assert "{resume_id}" in argv
-    assert "{prompt}" in argv
+    assert agent.argv[0] == str(claude)
+    assert agent.env["PATH"].split(os.pathsep)[0] == str(claude.parent)
+    assert "{resume_id}" in agent.argv
+    assert "{prompt}" in agent.argv
 
 
-def test_non_posix_commands_do_not_depend_on_usr_bin_env(tmp_path, monkeypatch):
-    claude = executable(tmp_path / "provider tools" / "claude")
-    monkeypatch.setenv("PATH", str(claude.parent))
-    monkeypatch.setattr(modes, "_ENV_EXECUTABLE", None)
+def test_runtime_environment_never_executes_usr_bin_env(tmp_path, monkeypatch):
+    copilot = executable(tmp_path / "provider tools" / "copilot")
+    monkeypatch.setenv("PATH", str(copilot.parent))
 
     command = resolve_runtime_command(
-        "claude_code",
-        KNOWN_RUNTIMES["claude_code"]["managed_command"],
+        "copilot",
+        KNOWN_RUNTIMES["copilot"]["connection_test_command"],
     )
-    argv = shlex.split(command)
+    agent = doctor.AgentCommand.parse(f"copilot={command}")
 
-    assert argv[0] == str(claude)
-    assert not any(argument.startswith("PATH=") for argument in argv)
+    assert agent.argv[0] == str(copilot)
+    assert "/usr/bin/env" not in agent.argv
+    assert agent.env["COPILOT_HOME"] == ".synchri-copilot-canary"
+    assert agent.env["PATH"].split(os.pathsep)[0] == str(copilot.parent)

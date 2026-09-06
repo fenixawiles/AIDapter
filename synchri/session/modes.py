@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 from dataclasses import dataclass, field
@@ -19,11 +20,8 @@ from pathlib import Path
 from ..errors import ValidationError
 from .permissions import Decision, PermissionSet
 
-_ENV_EXECUTABLE = (
-    "/usr/bin/env"
-    if os.name == "posix" and Path("/usr/bin/env").is_file()
-    else None
-)
+_RUNTIME_ENV_PREFIX = "__synchri_runtime_env__"
+_ENVIRONMENT_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=(.*)$", re.DOTALL)
 
 
 class SessionMode(str, Enum):
@@ -726,6 +724,22 @@ def configure_runtime_executable_overrides(overrides: dict[str, str]) -> None:
     _RUNTIME_EXECUTABLE_OVERRIDES.update(overrides)
 
 
+def split_runtime_command_environment(argv: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Remove a maintained environment envelope before direct process launch."""
+    if not argv or argv[0] != _RUNTIME_ENV_PREFIX:
+        return argv, {}
+    environment: dict[str, str] = {}
+    index = 1
+    while index < len(argv):
+        match = _ENVIRONMENT_ASSIGNMENT.fullmatch(argv[index])
+        if not match:
+            break
+        key, _, value = argv[index].partition("=")
+        environment[key] = value
+        index += 1
+    return argv[index:], environment
+
+
 def resolve_runtime_executable(runtime: str, *, definition: dict | None = None) -> str | None:
     """Resolve a maintained runtime once, before any provider command runs."""
     spec = definition or KNOWN_RUNTIMES.get(runtime, KNOWN_RUNTIMES["generic"])
@@ -777,6 +791,12 @@ def resolve_runtime_command(
         argv = shlex.split(parseable)
     except ValueError:
         return command
+    if argv and argv[0] == "/usr/bin/env":
+        # Adapter definitions may carry environment assignments (Copilot's
+        # hardened canary does). Turn the platform-specific wrapper into an
+        # internal envelope; AgentCommand and passive probes consume it into
+        # the subprocess environment before launch on every operating system.
+        argv[0] = _RUNTIME_ENV_PREFIX
     for index, argument in enumerate(argv):
         if argument in {executable, path}:
             argv[index] = path
@@ -795,10 +815,10 @@ def resolve_runtime_command(
                     if value and str(Path(value).expanduser()) != runtime_directory
                 ]
             )
-            if _ENV_EXECUTABLE and argv[0] == _ENV_EXECUTABLE:
+            if argv[0] == _RUNTIME_ENV_PREFIX:
                 argv.insert(1, f"PATH={child_path}")
-            elif _ENV_EXECUTABLE:
-                argv = [_ENV_EXECUTABLE, f"PATH={child_path}", *argv]
+            else:
+                argv = [_RUNTIME_ENV_PREFIX, f"PATH={child_path}", *argv]
             resolved = shlex.join(argv)
             for placeholder, original in placeholders.items():
                 resolved = resolved.replace(placeholder, original)
