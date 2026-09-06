@@ -53,17 +53,17 @@ _VERSION_DIRECTORY = re.compile(
 )
 
 
-def _connected_cli_directories(workspace: Workspace) -> list[str]:
-    """Return executable directories from still-connected runtime records.
+def _connected_cli_executables(workspace: Workspace) -> dict[str, str]:
+    """Return still-valid, runtime-scoped executable records.
 
     The database is opened read-only so preparing the desktop environment can
     never create or migrate state. A record contributes only the exact runtime
-    executable it originally verified; unrelated or malformed paths are
-    ignored instead of becoming executable search locations.
+    executable it originally verified; its directory is never promoted to the
+    global PATH, where an unrelated sibling provider could inherit its trust.
     """
     database = workspace.db_path
     if not database.is_file():
-        return []
+        return {}
     connection = None
     try:
         connection = sqlite3.connect(
@@ -76,7 +76,7 @@ def _connected_cli_directories(workspace: Workspace) -> list[str]:
             "WHERE state = 'connected' AND executable_path IS NOT NULL"
         ).fetchall()
     except sqlite3.Error:
-        return []
+        return {}
     finally:
         if connection is not None:
             connection.close()
@@ -85,7 +85,7 @@ def _connected_cli_directories(workspace: Workspace) -> list[str]:
     # its environment setup part of the session-mode import graph.
     from synchri.session.modes import KNOWN_RUNTIMES
 
-    directories: list[str] = []
+    executables: dict[str, str] = {}
     for runtime, raw_path in rows:
         expected = (KNOWN_RUNTIMES.get(runtime) or {}).get("executable")
         candidate = Path(raw_path) if raw_path else None
@@ -97,8 +97,8 @@ def _connected_cli_directories(workspace: Workspace) -> list[str]:
             and candidate.is_file()
             and os.access(candidate, os.X_OK)
         ):
-            directories.append(str(candidate.parent))
-    return directories
+            executables[runtime] = str(candidate)
+    return executables
 
 
 def _version_manager_sort_key(path: Path) -> tuple[int, int, int, bool, str]:
@@ -120,12 +120,10 @@ def desktop_cli_path(
     current: str | None = None,
     *,
     home: Path | None = None,
-    workspace: Workspace | None = None,
 ) -> str:
     """Build the deterministic PATH inherited by the engine and its agents."""
     user_home = (home or Path.home()).expanduser()
     existing = (os.environ.get("PATH", "") if current is None else current).split(os.pathsep)
-    connected = _connected_cli_directories(workspace or resolve_workspace())
     version_manager_paths = (
         path
         for pattern in _VERSION_MANAGER_CLI_GLOBS
@@ -141,7 +139,6 @@ def desktop_cli_path(
     ]
     candidates = [
         *existing,
-        *connected,
         *(str(user_home / relative) for relative in _DESKTOP_CLI_DIRECTORIES),
         *version_managers,
         *_SYSTEM_CLI_DIRECTORIES,
@@ -161,7 +158,15 @@ def desktop_cli_path(
 
 def prepare_desktop_environment(workspace: Workspace | None = None) -> None:
     """Give a Finder-launched app the CLI environment a terminal already has."""
-    os.environ["PATH"] = desktop_cli_path(workspace=workspace)
+    os.environ["PATH"] = desktop_cli_path()
+    from synchri.session.modes import (
+        configure_runtime_executable_overrides,
+    )
+
+    resolved_workspace = workspace or resolve_workspace()
+    configure_runtime_executable_overrides(
+        _connected_cli_executables(resolved_workspace)
+    )
 
 
 def _requested_workspace(args: list[str]) -> Workspace:

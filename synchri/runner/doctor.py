@@ -167,6 +167,12 @@ def passive_report(
     version: str | None = None
     if path:
         version_command = spec.get("version_command") or f"{shlex.quote(path)} --version"
+        version_command = resolve_runtime_command(
+            runtime,
+            version_command,
+            definition=spec,
+            executable_path=path,
+        )
         state, version, detail = _probe_version(version_command, timeout)
         floor = spec.get("min_version")
         if state == PASS and floor:

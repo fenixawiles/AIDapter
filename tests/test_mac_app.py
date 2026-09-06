@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import shlex
-import shutil
 import sys
 from pathlib import Path
 
@@ -17,6 +16,7 @@ from synchri.session.modes import (
     managed_command,
     planning_command,
     resolve_runtime_command,
+    resolve_runtime_executable,
 )
 from synchri.storage import db
 
@@ -59,21 +59,21 @@ def connected_workspace(
     return workspace
 
 
-def test_desktop_path_restores_a_verified_cli_outside_finders_path(tmp_path):
+def test_desktop_environment_restores_only_the_verified_runtime(tmp_path, monkeypatch):
     cli = executable(tmp_path / "custom-toolchain" / "claude")
+    sibling = executable(tmp_path / "custom-toolchain" / "codex")
     executable(tmp_path / "home" / ".local" / "bin" / "claude")
     workspace = connected_workspace(tmp_path / "state", "claude_code", cli)
+    monkeypatch.setenv("PATH", FINDER_PATH)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
-    resolved = mac_app.desktop_cli_path(
-        FINDER_PATH,
-        home=tmp_path / "home",
-        workspace=workspace,
-    ).split(os.pathsep)
+    mac_app.prepare_desktop_environment(workspace)
+    resolved = os.environ["PATH"].split(os.pathsep)
 
     assert resolved[:4] == FINDER_PATH.split(os.pathsep)
-    assert resolved.index(str(cli.parent)) < resolved.index(
-        str(tmp_path / "home" / ".local" / "bin")
-    )
+    assert str(cli.parent) not in resolved
+    assert resolve_runtime_executable("claude_code") == str(cli)
+    assert resolve_runtime_executable("codex") != str(sibling)
 
 
 def test_desktop_entrypoint_prepares_path_before_starting_the_ui(tmp_path, monkeypatch):
@@ -86,7 +86,7 @@ def test_desktop_entrypoint_prepares_path_before_starting_the_ui(tmp_path, monke
 
     def fake_main(args):
         assert args == ["ui"]
-        assert shutil.which("claude") == str(cli)
+        assert resolve_runtime_executable("claude_code") == str(cli)
         return 0
 
     monkeypatch.setattr(mac_app, "cli_main", fake_main)
@@ -111,7 +111,7 @@ def test_desktop_entrypoint_uses_the_explicit_workspace_for_connected_clis(
 
     def fake_main(args):
         assert args == ["--home", str(requested.home), "ui"]
-        assert shutil.which("claude") == str(cli)
+        assert resolve_runtime_executable("claude_code") == str(cli)
         return 0
 
     monkeypatch.setattr(mac_app, "cli_main", fake_main)
@@ -139,13 +139,15 @@ def test_version_manager_paths_are_ordered_by_version_not_text(tmp_path):
     resolved = mac_app.desktop_cli_path(
         FINDER_PATH,
         home=tmp_path / "home",
-        workspace=Workspace(tmp_path / "empty-state"),
     ).split(os.pathsep)
 
     assert resolved.index(str(current)) < resolved.index(str(old))
 
 
-def test_desktop_path_does_not_trust_failed_or_misnamed_runtime_records(tmp_path):
+def test_desktop_environment_does_not_trust_failed_or_misnamed_runtime_records(
+    tmp_path,
+    monkeypatch,
+):
     failed = executable(tmp_path / "failed-toolchain" / "claude")
     workspace = connected_workspace(
         tmp_path / "state",
@@ -170,23 +172,29 @@ def test_desktop_path_does_not_trust_failed_or_misnamed_runtime_records(tmp_path
     )
     connection.close()
 
-    resolved = mac_app.desktop_cli_path(
-        FINDER_PATH,
-        home=tmp_path / "home",
-        workspace=workspace,
-    ).split(os.pathsep)
+    monkeypatch.setenv("PATH", FINDER_PATH)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    mac_app.prepare_desktop_environment(workspace)
 
-    assert str(failed.parent) not in resolved
-    assert str(tmp_path / "wrong-name") not in resolved
+    assert resolve_runtime_executable("claude_code") != str(failed)
+    assert resolve_runtime_executable("codex") != str(tmp_path / "wrong-name" / "agent")
 
 
 def test_maintained_commands_pin_the_resolved_runtime_executable(tmp_path, monkeypatch):
     claude = executable(tmp_path / "bin with spaces" / "claude")
-    monkeypatch.setenv("PATH", str(claude.parent))
+    executable(claude.parent / "node")
+    newer_node = executable(tmp_path / "newer-node" / "node")
+    monkeypatch.setenv(
+        "PATH",
+        os.pathsep.join((str(newer_node.parent), str(claude.parent))),
+    )
     plan = ParticipantPlan("Claude", "claude_code", "primary_builder")
 
-    assert shlex.split(managed_command(plan))[0] == str(claude)
-    assert shlex.split(planning_command(plan))[0] == str(claude)
+    for command in (managed_command(plan), planning_command(plan)):
+        argv = shlex.split(command)
+        assert argv[0] == "/usr/bin/env"
+        assert argv[1].removeprefix("PATH=").split(os.pathsep)[0] == str(claude.parent)
+        assert str(claude) in argv
 
 
 def test_wrapped_canary_pins_copilot_without_losing_placeholders(tmp_path, monkeypatch):
@@ -202,6 +210,7 @@ def test_wrapped_canary_pins_copilot_without_losing_placeholders(tmp_path, monke
     argv = shlex.split(command)
 
     assert argv[0] == "/usr/bin/env"
+    assert argv[1].removeprefix("PATH=").split(os.pathsep)[0] == str(copilot.parent)
     assert str(copilot) in argv
     assert "{prompt}" in argv
 
@@ -218,6 +227,8 @@ def test_resume_command_keeps_both_deferred_values_unquoted(tmp_path, monkeypatc
     )
     argv = shlex.split(command)
 
-    assert argv[0] == str(claude)
+    assert argv[0] == "/usr/bin/env"
+    assert argv[1].removeprefix("PATH=").split(os.pathsep)[0] == str(claude.parent)
+    assert str(claude) in argv
     assert "{resume_id}" in argv
     assert "{prompt}" in argv

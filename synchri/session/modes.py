@@ -9,6 +9,7 @@ new entry in ``POLICIES``, not a redesign of startup.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 from dataclasses import dataclass, field
@@ -710,10 +711,29 @@ def default_agent_name(runtime: str, taken: set[str] | None = None) -> str:
     return f"{base}-{counter}"
 
 
+_RUNTIME_EXECUTABLE_OVERRIDES: dict[str, str] = {}
+
+
+def configure_runtime_executable_overrides(overrides: dict[str, str]) -> None:
+    """Replace the process-local executable map restored by the desktop app."""
+    _RUNTIME_EXECUTABLE_OVERRIDES.clear()
+    _RUNTIME_EXECUTABLE_OVERRIDES.update(overrides)
+
+
 def resolve_runtime_executable(runtime: str, *, definition: dict | None = None) -> str | None:
     """Resolve a maintained runtime once, before any provider command runs."""
     spec = definition or KNOWN_RUNTIMES.get(runtime, KNOWN_RUNTIMES["generic"])
     executable = spec.get("executable")
+    override = _RUNTIME_EXECUTABLE_OVERRIDES.get(runtime)
+    if executable and override:
+        candidate = Path(override).expanduser()
+        if (
+            candidate.is_absolute()
+            and candidate.name == executable
+            and candidate.is_file()
+            and os.access(candidate, os.X_OK)
+        ):
+            return str(candidate)
     return shutil.which(executable) if executable else None
 
 
@@ -752,8 +772,27 @@ def resolve_runtime_command(
     except ValueError:
         return command
     for index, argument in enumerate(argv):
-        if argument == executable:
+        if argument in {executable, path}:
             argv[index] = path
+            # Node-installed CLIs commonly use ``#!/usr/bin/env node``. Put
+            # the selected CLI's own bin directory first for this child only,
+            # so its launcher cannot accidentally inherit Node from a newer
+            # nvm/fnm installation. This also avoids globally promoting
+            # sibling provider executables from a connected runtime record.
+            runtime_directory = str(Path(path).parent)
+            inherited_path = os.environ.get("PATH", os.defpath)
+            child_path = os.pathsep.join(
+                [runtime_directory]
+                + [
+                    value
+                    for value in inherited_path.split(os.pathsep)
+                    if value and str(Path(value).expanduser()) != runtime_directory
+                ]
+            )
+            if argv[0] == "/usr/bin/env":
+                argv.insert(1, f"PATH={child_path}")
+            else:
+                argv = ["/usr/bin/env", f"PATH={child_path}", *argv]
             resolved = shlex.join(argv)
             for placeholder, original in placeholders.items():
                 resolved = resolved.replace(placeholder, original)
